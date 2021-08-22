@@ -29,12 +29,15 @@
 #include "ur_modern_driver/ros/action_server.h"
 #include "ur_modern_driver/ros/controller.h"
 #include "ur_modern_driver/ros/io_service.h"
+#include "ur_modern_driver/ros/rtde_trajectory_follower.h"
 #include "ur_modern_driver/ros/lowbandwidth_trajectory_follower.h"
 #include "ur_modern_driver/ros/mb_publisher.h"
 #include "ur_modern_driver/ros/rt_publisher.h"
 #include "ur_modern_driver/ros/service_stopper.h"
 #include "ur_modern_driver/ros/trajectory_follower.h"
 #include "ur_modern_driver/ros/urscript_handler.h"
+#include "ur_modern_driver/ros/dashboard_client.h"
+#include "ur_modern_driver/ros/tracker.h"
 #include "ur_modern_driver/ur/commander.h"
 #include "ur_modern_driver/ur/factory.h"
 #include "ur_modern_driver/ur/messages.h"
@@ -48,6 +51,7 @@ static const std::string REVERSE_IP_ADDR_ARG("~reverse_ip_address");
 static const std::string REVERSE_PORT_ARG("~reverse_port");
 static const std::string ROS_CONTROL_ARG("~use_ros_control");
 static const std::string LOW_BANDWIDTH_TRAJECTORY_FOLLOWER("~use_lowbandwidth_trajectory_follower");
+static const std::string RTDE_TRAJECTORY_FOLLOWER("~use_rtde_trajectory_follower");
 static const std::string MAX_VEL_CHANGE_ARG("~max_vel_change");
 static const std::string PREFIX_ARG("~prefix");
 static const std::string BASE_FRAME_ARG("~base_frame");
@@ -78,6 +82,7 @@ public:
   double max_vel_change;
   bool use_ros_control;
   bool use_lowbandwidth_trajectory_follower;
+  bool use_rtde_trajectory_follower;
   bool shutdown_on_disconnect;
 };
 
@@ -116,12 +121,14 @@ bool parse_args(ProgArgs &args)
     LOG_ERROR("robot_ip_address parameter must be set!");
     return false;
   }
+  LOG_INFO("Using robot IP: %s", args.host.c_str());
   ros::param::param(REVERSE_IP_ADDR_ARG, args.reverse_ip_address, std::string());
   ros::param::param(REVERSE_PORT_ARG, args.reverse_port, int32_t(50001));
   ros::param::param(MAX_VEL_CHANGE_ARG, args.max_vel_change, 15.0);  // rad/s
   ros::param::param(MAX_VEL_CHANGE_ARG, args.max_velocity, 10.0);
   ros::param::param(ROS_CONTROL_ARG, args.use_ros_control, false);
   ros::param::param(LOW_BANDWIDTH_TRAJECTORY_FOLLOWER, args.use_lowbandwidth_trajectory_follower, false);
+  ros::param::param(RTDE_TRAJECTORY_FOLLOWER, args.use_rtde_trajectory_follower, false);
   ros::param::param(PREFIX_ARG, args.prefix, std::string());
   ros::param::param(BASE_FRAME_ARG, args.base_frame, args.prefix + "base_link");
   ros::param::param(TOOL_FRAME_ARG, args.tool_frame, args.prefix + "tool0_controller");
@@ -173,6 +180,7 @@ int main(int argc, char **argv)
   INotifier *notifier(nullptr);
   ROSController *controller(nullptr);
   ActionServer *action_server(nullptr);
+  ActionTrajectoryFollowerInterface *traj_follower(nullptr);
   if (args.use_ros_control)
   {
     LOG_INFO("ROS control enabled");
@@ -186,8 +194,16 @@ int main(int argc, char **argv)
   else
   {
     LOG_INFO("ActionServer enabled");
-    ActionTrajectoryFollowerInterface *traj_follower(nullptr);
-    if (args.use_lowbandwidth_trajectory_follower)
+    if (args.use_rtde_trajectory_follower)
+    {
+      if(!factory.isVersion3()) {
+        LOG_FATAL("RTDE trajectory follower can only be used with version 3 or above!");
+        std::exit(EXIT_FAILURE);
+      }
+      LOG_INFO("Use RTDE trajectory follower");
+      traj_follower = new RTDETrajectoryFollower(args.host);
+    }
+    else if (args.use_lowbandwidth_trajectory_follower)
     {
       LOG_INFO("Use low bandwidth trajectory follower");
       traj_follower =
@@ -203,8 +219,25 @@ int main(int argc, char **argv)
     services.push_back(action_server);
   }
 
+  Tracker tracker(*rt_commander);
+  services.push_back(&tracker);
+
   URScriptHandler urscript_handler(*rt_commander);
+  if (args.use_rtde_trajectory_follower) {
+    LOG_INFO("Enabling RTDE mode for URScriptHandler");
+    auto rtde_follower = dynamic_cast<RTDETrajectoryFollower *>(traj_follower);
+    if (!rtde_follower) {
+      LOG_FATAL("Unable to cast follower to RTDE follower!");
+      return EXIT_FAILURE;
+    }
+    urscript_handler.enableRTDEMode(rtde_follower->get_control_interface());
+    rtde_follower->set_script_handler(&urscript_handler);
+  }
   services.push_back(&urscript_handler);
+
+  DashboardClient dashboard_client(args.host);
+  services.push_back(&dashboard_client);
+
   if (args.shutdown_on_disconnect)
   {
     LOG_INFO("Notifier: Pipeline disconnect will shutdown the node");

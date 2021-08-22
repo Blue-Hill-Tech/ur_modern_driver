@@ -15,11 +15,12 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 #include "ur_modern_driver/ros/trajectory_follower.h"
 #include <endian.h>
 #include <ros/ros.h>
+#include <ur_msgs/TrajectoryFeedback.h>
 #include <cmath>
+#include <fstream>
 
 static const int32_t MULT_JOINTSTATE_ = 1000000;
 static const std::string JOINT_STATE_REPLACE("{{JOINT_STATE_REPLACE}}");
@@ -34,14 +35,41 @@ def driverProg():
 	SERVO_RUNNING = 1
 	cmd_servo_state = SERVO_IDLE
 	cmd_servo_q = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-	
+  global MAX_JOINT_DIFFERENCE = 0.02
+  global JOINT_NUM = 6
+
 	def set_servo_setpoint(q):
 		enter_critical
 		cmd_servo_state = SERVO_RUNNING
 		cmd_servo_q = q
 		exit_critical
 	end
-	
+
+  def close_to_current(position):
+    local l_current_position = get_actual_joint_positions()
+    local l_index = 0
+    while l_index < JOINT_NUM:
+      if norm(position[l_index] - l_current_position[l_index]) > MAX_JOINT_DIFFERENCE:
+          return False
+      end
+      l_index = l_index + 1
+    end
+    return True
+  end
+
+  def get_max_joint_difference(position):
+    local l_current_position = get_actual_joint_positions()
+    local l_index = 0
+    local l_max_joint_difference = 0.0
+    while l_index < JOINT_NUM:
+      if norm(position[l_index] - l_current_position[l_index]) > l_max_joint_difference:
+        l_max_joint_difference = norm(position[l_index] - l_current_position[l_index])
+      end
+      l_index = l_index + 1
+    end
+    return l_max_joint_difference
+  end
+
 	thread servoThread():
 		state = SERVO_IDLE
 		while True:
@@ -67,16 +95,22 @@ def driverProg():
 
   socket_open("{{SERVER_IP_REPLACE}}", {{SERVER_PORT_REPLACE}})
 
+  textmsg("Starting bluehill program")
   thread_servo = run servoThread()
   keepalive = 1
+  max_joint_difference = 0.0
   while keepalive > 0:
 	  params_mult = socket_read_binary_integer(6+1)
 	  if params_mult[0] > 0:
 		  q = [params_mult[1] / MULT_jointstate, params_mult[2] / MULT_jointstate, params_mult[3] / MULT_jointstate, params_mult[4] / MULT_jointstate, params_mult[5] / MULT_jointstate, params_mult[6] / MULT_jointstate]
 		  keepalive = params_mult[7]
+      if keepalive == 0:
+        break
+      end
 		  set_servo_setpoint(q)
 	  end
   end
+  textmsg("Found max joint difference: ", max_joint_difference)
   sleep(.1)
   socket_close()
   kill thread_servo
@@ -89,22 +123,20 @@ TrajectoryFollower::TrajectoryFollower(URCommander &commander, std::string &reve
   , commander_(commander)
   , server_(reverse_port)
   , servoj_time_(0.008)
-  , servoj_lookahead_time_(0.03)
-  , servoj_gain_(300.)
+  , log_servoj_(false)
 {
   ros::param::get("~servoj_time", servoj_time_);
-  ros::param::get("~servoj_lookahead_time", servoj_lookahead_time_);
-  ros::param::get("~servoj_gain", servoj_gain_);
+
+  status_pub_ = nh_.advertise<ur_msgs::TrajectoryFeedback>("ur_driver/tracking_status", 20);
 
   std::string res(POSITION_PROGRAM);
   res.replace(res.find(JOINT_STATE_REPLACE), JOINT_STATE_REPLACE.length(), std::to_string(MULT_JOINTSTATE_));
 
-  std::ostringstream out;
-  out << "t=" << std::fixed << std::setprecision(4) << servoj_time_;
-  if (version_3)
-    out << ", lookahead_time=" << servoj_lookahead_time_ << ", gain=" << servoj_gain_;
+  if (!version_3) {
+    LOG_ERROR("Failed to run trajectory, version is below 3");
+    std::exit(-1);
+  }
 
-  res.replace(res.find(SERVO_J_REPLACE), SERVO_J_REPLACE.length(), out.str());
   res.replace(res.find(SERVER_IP_REPLACE), SERVER_IP_REPLACE.length(), reverse_ip);
   res.replace(res.find(SERVER_PORT_REPLACE), SERVER_PORT_REPLACE.length(), std::to_string(reverse_port));
   program_ = res;
@@ -116,14 +148,24 @@ TrajectoryFollower::TrajectoryFollower(URCommander &commander, std::string &reve
   }
 }
 
-bool TrajectoryFollower::start()
+bool TrajectoryFollower::start(double servoj_gain, double servoj_lookahead_time)
 {
   if (running_)
     return true;  // not sure
 
-  LOG_INFO("Uploading trajectory program to robot");
+  LOG_INFO("Uploading trajectory program to robot with servoj gain: %f and lookahead_time: %f", servoj_gain, servoj_lookahead_time);
 
-  if (!commander_.uploadProg(program_))
+  // Updating program
+  std::string updated_program = program_;
+  std::ostringstream out;
+  out << "t=" << std::fixed << std::setprecision(4) << servoj_time_ << ", lookahead_time=" << servoj_lookahead_time << ", gain=" << servoj_gain;
+  updated_program.replace(updated_program.find(SERVO_J_REPLACE), SERVO_J_REPLACE.length(), out.str());
+
+  // Clear servoj log
+  servoj_log_.clear();
+
+  // Upload program
+  if (!commander_.uploadProg(updated_program))
   {
     LOG_ERROR("Program upload failed!");
     return false;
@@ -141,13 +183,15 @@ bool TrajectoryFollower::start()
   return (running_ = true);
 }
 
-bool TrajectoryFollower::execute(std::array<double, 6> &positions, bool keep_alive)
+bool TrajectoryFollower::execute(const std::array<double, 6> &positions, bool keep_alive)
 {
   if (!running_)
     return false;
 
   //  LOG_INFO("servoj([%f,%f,%f,%f,%f,%f])", positions[0], positions[1], positions[2], positions[3], positions[4],
   //  positions[5]);
+  if(log_servoj_)    
+    servoj_log_.push_back(positions);
 
   last_positions_ = positions;
 
@@ -170,6 +214,14 @@ bool TrajectoryFollower::execute(std::array<double, 6> &positions, bool keep_ali
 
 double TrajectoryFollower::interpolate(double t, double T, double p0_pos, double p1_pos, double p0_vel, double p1_vel)
 {
+  if(t < 0) {
+      ROS_INFO_THROTTLE(1.0, "Detected interpolation loop t (%f) < 0", t);
+      return p0_pos;
+  }
+  if(t > T) {
+      ROS_INFO_THROTTLE(1.0, "Detected interpolation loop t (%f) > T (%f)", t, T);
+      return p1_pos;
+  }
   using std::pow;
   double a = p0_pos;
   double b = p0_vel;
@@ -183,7 +235,7 @@ bool TrajectoryFollower::execute(std::array<double, 6> &positions)
   return execute(positions, true);
 }
 
-bool TrajectoryFollower::execute(std::vector<TrajectoryPoint> &trajectory, std::atomic<bool> &interrupt)
+bool TrajectoryFollower::execute(std::vector<TrajectoryPoint> &trajectory, std::atomic<bool> &interrupt, std::atomic<bool> &paused)
 {
   if (!running_)
     return false;
@@ -201,6 +253,7 @@ bool TrajectoryFollower::execute(std::vector<TrajectoryPoint> &trajectory, std::
 
   std::array<double, 6> positions;
 
+  uint32_t idx = 0;
   for (auto const &point : trajectory)
   {
     // skip t0
@@ -210,46 +263,96 @@ bool TrajectoryFollower::execute(std::vector<TrajectoryPoint> &trajectory, std::
     if (interrupt)
       break;
 
+    while (paused) {
+      if (interrupt) {
+        break;
+      } else {
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+      }
+    }
+
     auto duration = point.time_from_start - prev.time_from_start;
     double d_s = duration_cast<double_seconds>(duration).count();
 
     // interpolation loop
+    double t = 0;
     while (!interrupt)
     {
-      latest = Clock::now();
-      auto elapsed = latest - t0;
+      while (paused) {
+        if (interrupt) {
+          break;
+        } else {
+          std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        }
+      }
+      if (interrupt)
+        break;      
 
-      if (point.time_from_start <= elapsed)
-        break;
-
-      if (last.time_from_start <= elapsed)
-        return true;
-
-      double elapsed_s = duration_cast<double_seconds>(elapsed - prev.time_from_start).count();
-      for (size_t j = 0; j < positions.size(); j++)
-      {
-        positions[j] =
-            interpolate(elapsed_s, d_s, prev.positions[j], point.positions[j], prev.velocities[j], point.velocities[j]);
+      for (size_t j = 0; j < positions.size(); j++) {
+          positions[j] =
+            interpolate(t, d_s, prev.positions[j], point.positions[j], prev.velocities[j], point.velocities[j]);
       }
 
       if (!execute(positions, true))
         return false;
 
-      std::this_thread::sleep_for(std::chrono::milliseconds((int)((servoj_time_ * 1000) / 4.)));
+      Time servoj_time = Clock::now();
+      //std::this_thread::sleep_for(std::chrono::milliseconds((int)((servoj_time_ * 1000) / 4.)));
+      std::this_thread::sleep_for(std::chrono::microseconds(500));
+      //t += 0.000500;
+      t += duration_cast<double_seconds>(Clock::now() - servoj_time).count();
+
+      if(t > d_s) {
+          if (!execute(point.positions, true)) {
+              return false;
+          } else {
+              break;
+          }
+      }
     }
 
     prev = point;
+
+    // Update current tracking status
+    ur_msgs::TrajectoryFeedback status_msg;
+    status_msg.header.stamp = ros::Time::now();
+    status_msg.current_idx = idx;
+    status_msg.goal_id = current_gh_id;
+    status_pub_.publish(status_msg);
+    idx++;
+  }
+
+  // Setting keep_alive false breaks URScript loop, comment to revert to previous behavior
+  execute(last_positions_, false);
+
+  if (interrupt) {    
+    return true;
   }
 
   // In theory it's possible the last position won't be sent by
   // the interpolation loop above but rather some position between
   // t[N-1] and t[N] where N is the number of trajectory points.
   // To make sure this does not happen the last position is sent
-  return execute(last.positions, true);
+  //return execute(last.positions, true);
+  return true;
 }
 
 void TrajectoryFollower::stop()
 {
+  if(log_servoj_) {
+    std::string filename = std::string(getenv("HOME")) + "/" + std::to_string(ros::Time::now().toNSec()) + ".servoj";
+    std::ofstream file(filename);
+    if(!file.is_open()) {
+      ROS_ERROR("Unable to open file %s for writing!", filename.c_str());
+    } else {
+      ROS_INFO("Writing servoj commands to: %s", filename.c_str());
+      for(auto&& positions : servoj_log_) {
+        file << positions[0] << " " << positions[1] << " " << positions[2] << " " << positions[3] << " " << positions[4] << " " << positions[5] << "\n";
+      }
+    }
+    file.close();
+  }
+
   if (!running_)
     return;
 
@@ -257,5 +360,6 @@ void TrajectoryFollower::stop()
   // execute(empty, false);
 
   server_.disconnectClient();
+
   running_ = false;
 }

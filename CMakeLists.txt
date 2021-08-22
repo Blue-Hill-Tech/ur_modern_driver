@@ -8,6 +8,9 @@ if(NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE RelWithDebInfo)
 endif()
 
+set(CMAKE_MODULE_PATH ${CMAKE_CURRENT_LIST_DIR}/cmake)
+find_package(ur_rtde REQUIRED)
+
 find_package(catkin REQUIRED
   COMPONENTS
     actionlib
@@ -22,6 +25,7 @@ find_package(catkin REQUIRED
     tf
     trajectory_msgs
     ur_msgs
+    ur_dashboard_msgs
 )
 
 catkin_package(
@@ -40,6 +44,7 @@ catkin_package(
     sensor_msgs
     trajectory_msgs
     ur_msgs
+    ur_dashboard_msgs
 )
 
 
@@ -67,6 +72,7 @@ endif()
 include_directories(
   include
   ${catkin_INCLUDE_DIRS}
+  ${ur_rtde_INCLUDE_DIRS}
 )
 
 # Hardware Interface
@@ -79,11 +85,14 @@ target_link_libraries(ur_hardware_interface ${catkin_LIBRARIES})
 set(${PROJECT_NAME}_SOURCES
     src/ros/action_server.cpp
     src/ros/lowbandwidth_trajectory_follower.cpp
+    src/ros/rtde_trajectory_follower.cpp
     src/ros/mb_publisher.cpp
     src/ros/rt_publisher.cpp
     src/ros/service_stopper.cpp
     src/ros/trajectory_follower.cpp
+    src/ros/tracker.cpp
     src/ros/urscript_handler.cpp
+    src/ros/dashboard_client.cpp
     src/tcp_socket.cpp
     src/ur/commander.cpp
     src/ur/master_board.cpp
@@ -98,6 +107,7 @@ add_dependencies(ur_driver ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED
 target_link_libraries(ur_driver
   ur_hardware_interface
   ${catkin_LIBRARIES}
+  ${ur_rtde_LIBRARIES}
  )
 
 

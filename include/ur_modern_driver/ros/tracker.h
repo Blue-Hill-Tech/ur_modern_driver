@@ -1,5 +1,11 @@
 /*
+ * Copyright 2019 Dennis Ding (tracker)
+ *
  * Copyright 2017, 2018 Jarek Potiuk (low bandwidth trajectory follower)
+ *
+ * Copyright 2017, 2018 Simon Rasmussen (refactor)
+ *
+ * Copyright 2015, 2016 Thomas Timm Andersen (original version)
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,33 +30,27 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <trajectory_msgs/JointTrajectoryPoint.h>
 #include "ur_modern_driver/log.h"
-#include "ur_modern_driver/ros/action_trajectory_follower_interface.h"
+#include "ur_modern_driver/ros/service_stopper.h"
 #include "ur_modern_driver/ur/commander.h"
 #include "ur_modern_driver/ur/server.h"
 
-class LowBandwidthTrajectoryFollower : public ActionTrajectoryFollowerInterface
-{
+class Tracker : public Service {
 private:
-  std::atomic<bool> running_;
-  std::array<double, 6> last_positions_;
   URCommander &commander_;
-  URServer server_;
-
-  double time_interval_, servoj_time_, servoj_time_waiting_, max_waiting_time_, servoj_gain_, servoj_lookahead_time_,
-      max_joint_difference_;
-
-  std::string program_;
-
-  bool execute(const std::array<double, 6> &positions, const std::array<double, 6> &velocities, double sample_number,
-               double time_in_seconds);
+  ros::NodeHandle nh_;
+  ros::Subscriber point_sub_;
+  RobotState state_;
+  ros::Timer timer_;
+  ros::Time last_track_;
 
 public:
-  LowBandwidthTrajectoryFollower(URCommander &commander, std::string &reverse_ip, int reverse_port, bool version_3);
+  Tracker(URCommander &commander);
+  void onRobotStateChange(RobotState state);
+  virtual ~Tracker(){};
 
-  bool start(double servoj_gain, double servoj_lookahead_time);
-  bool execute(std::vector<TrajectoryPoint> &trajectory, std::atomic<bool> &interrupt, std::atomic<bool> &paused);
+private:
+  void point_cb(trajectory_msgs::JointTrajectoryPointConstPtr point);
   void stop();
-
-  virtual ~LowBandwidthTrajectoryFollower(){};
 };

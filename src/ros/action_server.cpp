@@ -18,8 +18,8 @@
  * limitations under the License.
  */
 
-#include "ur_modern_driver/ros/action_server.h"
 #include <cmath>
+#include "ur_modern_driver/ros/action_server.h"
 
 ActionServer::ActionServer(ActionTrajectoryFollowerInterface& follower, std::vector<std::string>& joint_names,
                            double max_velocity)
@@ -29,11 +29,13 @@ ActionServer::ActionServer(ActionTrajectoryFollowerInterface& follower, std::vec
   , joint_set_(joint_names.begin(), joint_names.end())
   , max_velocity_(max_velocity)
   , interrupt_traj_(false)
+  , pause_traj_(false)
   , has_goal_(false)
   , running_(false)
   , follower_(follower)
   , state_(RobotState::Error)
 {
+  pause_service_ = nh_.subscribe("/ur_driver/set_program_state", 20, &ActionServer::onPause, this);
 }
 
 void ActionServer::start()
@@ -156,8 +158,7 @@ bool ActionServer::validateState(GoalHandle& gh, Result& res)
   }
 }
 
-bool ActionServer::validateJoints(GoalHandle& gh, Result& res)
-{
+bool ActionServer::validateJoints(GoalHandle& gh, Result& res) {
   auto goal = gh.getGoal();
   auto const& joints = goal->trajectory.joint_names;
   std::set<std::string> goal_joints(joints.begin(), joints.end());
@@ -254,20 +255,18 @@ bool ActionServer::try_execute(GoalHandle& gh, Result& res)
   // locked here
   curr_gh_ = gh;
   interrupt_traj_ = false;
+  pause_traj_ = false;
   has_goal_ = true;
   tj_mutex_.unlock();
   tj_cv_.notify_one();
   return true;
 }
 
-std::vector<size_t> ActionServer::reorderMap(std::vector<std::string> goal_joints)
-{
+std::vector<size_t> ActionServer::reorderMap(std::vector<std::string> goal_joints) {
   std::vector<size_t> indecies;
-  for (auto const& aj : joint_names_)
-  {
+  for (auto const& aj : joint_names_) {
     size_t j = 0;
-    for (auto const& gj : goal_joints)
-    {
+    for (auto const& gj : goal_joints) {
       if (aj == gj)
         break;
       j++;
@@ -277,12 +276,10 @@ std::vector<size_t> ActionServer::reorderMap(std::vector<std::string> goal_joint
   return indecies;
 }
 
-void ActionServer::trajectoryThread()
-{
+void ActionServer::trajectoryThread() {
   LOG_INFO("Trajectory thread started");
 
-  while (running_)
-  {
+  while (running_) {
     std::unique_lock<std::mutex> lk(tj_mutex_);
     if (!tj_cv_.wait_for(lk, std::chrono::milliseconds(100), [&] { return running_ && has_goal_; }))
       continue;
@@ -304,17 +301,14 @@ void ActionServer::trajectoryThread()
     auto fpt = convert(fp.time_from_start);
 
     // make sure we have a proper t0 position
-    if (fpt > std::chrono::microseconds(0))
-    {
-      LOG_INFO("Trajectory without t0 recieved, inserting t0 at currrent position");
+    if (fpt > std::chrono::microseconds(0)) {
+      LOG_INFO("Trajectory without t0 recieved, inserting t0 at current position");
       trajectory.push_back(TrajectoryPoint(q_actual_, qd_actual_, std::chrono::microseconds(0)));
     }
 
-    for (auto const& point : goal->trajectory.points)
-    {
+    for (auto const& point : goal->trajectory.points) {
       std::array<double, 6> pos, vel;
-      for (size_t i = 0; i < 6; i++)
-      {
+      for (size_t i = 0; i < 6; i++) {
         size_t idx = mapping[i];
         pos[idx] = point.positions[i];
         vel[idx] = point.velocities[i];
@@ -323,47 +317,67 @@ void ActionServer::trajectoryThread()
       trajectory.push_back(TrajectoryPoint(pos, vel, t));
     }
 
-    double t =
-        std::chrono::duration_cast<std::chrono::duration<double>>(trajectory[trajectory.size() - 1].time_from_start)
-            .count();
+    double t = std::chrono::duration_cast<std::chrono::duration<double>>(trajectory[trajectory.size() - 1].time_from_start).count();
     LOG_INFO("Executing trajectory with %zu points and duration of %4.3fs", trajectory.size(), t);
 
     Result res;
 
-    LOG_INFO("Attempting to start follower %p", &follower_);
-    if (follower_.start())
+    // Modified frame_id parameter pass through
+    std::stringstream ss(goal->trajectory.header.frame_id);
+    uint64_t goal_id; double sharpness; double servoj_gain; double servoj_lookahead_time;
+    ss >> goal_id >> sharpness;
+    bool servo_stop = false;
+    if (sharpness < 0)
     {
-      if (follower_.execute(trajectory, interrupt_traj_))
-      {
+      servo_stop = true;
+      sharpness = 0;
+    }
+    // convex combination between (100, 0.2) -> (500, 0.05)
+    // FIXME configure as rosparam
+    servoj_gain = (1 - sharpness) * 100 + sharpness * 500;
+    servoj_lookahead_time = (1 - sharpness) * 0.2 + sharpness * 0.05;
+    LOG_INFO("Received trajectory parameters goal_id: %d, gain: %f, lookahead_time: %f", (int)goal_id, servoj_gain, servoj_lookahead_time);
+    LOG_INFO("Attempting to start follower %p, servo_stop? %d", &follower_, int(servo_stop));
+    if (follower_.start(servoj_gain, servoj_lookahead_time)) {
+      follower_.current_gh_id = std::to_string(goal_id);
+      if (servo_stop ?
+          follower_.servo_stop() :
+          follower_.execute(trajectory, interrupt_traj_, pause_traj_)
+          ) {
         // interrupted goals must be handled by interrupt trigger
-        if (!interrupt_traj_)
-        {
+        if (!interrupt_traj_) {
           LOG_INFO("Trajectory executed successfully");
           res.error_code = Result::SUCCESSFUL;
           curr_gh_.setSucceeded(res);
-        }
-        else
+        } else {
           LOG_INFO("Trajectory interrupted");
-      }
-      else
-      {
+        }
+      } else {
         LOG_INFO("Trajectory failed");
         res.error_code = -100;
         res.error_string = "Connection to robot was lost";
         curr_gh_.setAborted(res, res.error_string);
       }
-
+      LOG_INFO("Attempting to stop follower %p", &follower_);
       follower_.stop();
-    }
-    else
-    {
+      LOG_INFO("Follower stopped");
+    } else {
       LOG_ERROR("Failed to start trajectory follower!");
       res.error_code = -100;
       res.error_string = "Robot connection could not be established";
       curr_gh_.setAborted(res, res.error_string);
     }
-
     has_goal_ = false;
     lk.unlock();
+  }
+}
+
+void ActionServer::onPause(std_msgs::BoolConstPtr msg) {
+  if (msg->data) {
+      ROS_INFO("Setting pause state %d -> %d", (bool) pause_traj_, true);
+      pause_traj_ = true;
+  } else {
+      ROS_INFO("Setting pause state %d -> %d", (bool) pause_traj_, false);
+      pause_traj_ = false;
   }
 }

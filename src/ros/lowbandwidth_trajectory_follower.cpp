@@ -296,7 +296,7 @@ LowBandwidthTrajectoryFollower::LowBandwidthTrajectoryFollower(URCommander &comm
   LOG_INFO("Low Bandwidth Trajectory Follower is initialized!");
 }
 
-bool LowBandwidthTrajectoryFollower::start()
+bool LowBandwidthTrajectoryFollower::start(double servoj_gain, double servoj_lookahead_time)
 {
   LOG_INFO("Starting LowBandwidthTrajectoryFollower");
 
@@ -319,7 +319,7 @@ bool LowBandwidthTrajectoryFollower::start()
     return false;
   }
 
-  LOG_DEBUG("Robot successfully connected");
+  LOG_INFO("Robot successfully connected");
   return (running_ = true);
 }
 
@@ -356,7 +356,7 @@ bool LowBandwidthTrajectoryFollower::execute(const std::array<double, 6> &positi
   return server_.write(buf, strlen(formatted_message) + 1, written);
 }
 
-bool LowBandwidthTrajectoryFollower::execute(std::vector<TrajectoryPoint> &trajectory, std::atomic<bool> &interrupt)
+bool LowBandwidthTrajectoryFollower::execute(std::vector<TrajectoryPoint> &trajectory, std::atomic<bool> &interrupt, std::atomic<bool> &paused)
 {
   if (!running_)
     return false;
@@ -369,14 +369,22 @@ bool LowBandwidthTrajectoryFollower::execute(std::vector<TrajectoryPoint> &traje
 
   while (!finished && !interrupt)
   {
+    while (paused) {
+      if (interrupt) {
+        break;
+      } else {
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+      }
+    }
+
     if (!server_.readLine((char *)line, MAX_SERVER_BUF_LEN))
     {
-      LOG_DEBUG("Connection closed. Finishing!");
+      LOG_WARN("Connection closed. Finishing!");
       finished = true;
       break;
     }
     unsigned int message_num = atoi((const char *)line);
-    LOG_DEBUG("Received request %i", message_num);
+    LOG_INFO("Received request %i", message_num);
     if (message_num < trajectory.size())
     {
       res = execute(trajectory[message_num].positions, trajectory[message_num].velocities, message_num,

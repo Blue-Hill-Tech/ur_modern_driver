@@ -3,7 +3,7 @@
 <package format="2">
   <name>ur_modern_driver</name>
   <version>0.1.0</version>
-  <description>Deprecated ROS 1 driver for CB1 and CB2 controllers with UR5 or UR10 robots from Universal Robots.</description>
+  <description>The new driver for Universal Robots UR3, UR5 and UR10 robots with CB2 and CB3 controllers.</description>
   <author>Thomas Timm Andersen</author>
   <author>Simon Rasmussen</author>
   <maintainer email="g.a.vanderhoorn@tudelft.nl">G.A. vd. Hoorn (TU Delft Robotics Institute)</maintainer>
@@ -29,6 +29,7 @@
   <depend>sensor_msgs</depend>
   <depend>trajectory_msgs</depend>
   <depend>ur_msgs</depend>
+  <depend>ur_dashboard_msgs</depend>
   <depend>tf</depend>
   <depend>std_srvs</depend>
 
@@ -40,8 +41,4 @@
   <exec_depend>velocity_controllers</exec_depend>
 
   <test_depend>rosunit</test_depend>
-  
-  <export>
-    <deprecated>This package has been deprecated. Users of CB3 and e-Series controllers should migrate to ur_robot_driver.</deprecated>
-  </export>
 </package>

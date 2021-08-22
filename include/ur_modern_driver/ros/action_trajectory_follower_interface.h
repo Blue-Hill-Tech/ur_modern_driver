@@ -45,8 +45,11 @@ struct TrajectoryPoint
 class ActionTrajectoryFollowerInterface
 {
 public:
-  virtual bool start() = 0;
-  virtual bool execute(std::vector<TrajectoryPoint> &trajectory, std::atomic<bool> &interrupt) = 0;
+  virtual bool start(double servoj_gain, double servoj_lookahead_time) = 0;
+  virtual bool execute(std::vector<TrajectoryPoint> &trajectory, std::atomic<bool> &interrupt, std::atomic<bool> &paused) = 0;
+  virtual bool execute_moveJ(std::vector<TrajectoryPoint> &trajectory, std::atomic<bool> &interrupt, std::atomic<bool> &paused){};
   virtual void stop() = 0;
+  virtual bool servo_stop(){};
   virtual ~ActionTrajectoryFollowerInterface(){};
+  std::string current_gh_id;
 };
