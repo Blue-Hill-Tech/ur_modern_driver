@@ -22,6 +22,7 @@
 #include <ur_msgs/SetIO.h>
 #include <ur_msgs/SetIORequest.h>
 #include <ur_msgs/SetIOResponse.h>
+#include <ur_msgs/Digital.h>
 #include <ur_msgs/SetPayload.h>
 #include <ur_msgs/SetPayloadRequest.h>
 #include <ur_msgs/SetPayloadResponse.h>
@@ -33,31 +34,41 @@ class IOService
 private:
   ros::NodeHandle nh_;
   URCommander& commander_;
-  ros::Subscriber io_service_;
+  ros::ServiceServer io_service_;
+  ros::Subscriber digital_io_cb_;
   ros::ServiceServer payload_service_;
 
-  void setIO(ur_msgs::SetIORequestConstPtr msg)
+  void setDigitalIO(ur_msgs::DigitalConstPtr msg)
   {
-    auto req = *msg;
+    bool flag = msg->state > 0.0 ? true : false;
+    commander_.setDigitalOut(msg->pin, flag);
+    LOG_INFO("setIO called with [%d] -> %g", msg->pin, msg->state);
+  }
+
+  bool setIO(ur_msgs::SetIORequest& req, ur_msgs::SetIOResponse& resp)
+  {
+    LOG_INFO("setIO called with [%d, %d] -> %g with latency: %ld [ms]", req.fun, req.pin, req.state, std::lround((ros::Time::now() - req.stamp).toSec() * 1000));
+    bool res = false;
     bool flag = req.state > 0.0 ? true : false;
     switch (req.fun)
     {
       case ur_msgs::SetIO::Request::FUN_SET_DIGITAL_OUT:
-        commander_.setDigitalOut(req.pin, flag);
+        res = commander_.setDigitalOut(req.pin, flag);
         break;
       case ur_msgs::SetIO::Request::FUN_SET_ANALOG_OUT:
-        commander_.setAnalogOut(req.pin, req.state);
+        res = commander_.setAnalogOut(req.pin, req.state);
         break;
       case ur_msgs::SetIO::Request::FUN_SET_TOOL_VOLTAGE:
-        commander_.setToolVoltage(static_cast<uint8_t>(req.state));
+        res = commander_.setToolVoltage(static_cast<uint8_t>(req.state));
         break;
       case ur_msgs::SetIO::Request::FUN_SET_FLAG:
-        commander_.setFlag(req.pin, flag);
+        res = commander_.setFlag(req.pin, flag);
         break;
       default:
         LOG_WARN("Invalid setIO function called (%d)", req.fun);
     }
-    LOG_INFO("setIO called with [%d, %d] -> %g with latency: %ld [ms]", req.fun, req.pin, req.state, std::lround((ros::Time::now() - req.stamp).toSec() * 1000));
+
+    return (resp.success = res);
   }
 
   bool setPayload(ur_msgs::SetPayloadRequest& req, ur_msgs::SetPayloadResponse& resp)
@@ -70,7 +81,8 @@ private:
 public:
   IOService(URCommander& commander)
     : commander_(commander)
-    , io_service_(nh_.subscribe("/ur_driver/set_io", 20, &IOService::setIO, this))
+    , io_service_(nh_.advertiseService("ur_driver/set_io", &IOService::setIO, this))
+    , digital_io_cb_(nh_.subscribe("/ur_driver/set_digital_io", 20, &IOService::setDigitalIO, this))
     , payload_service_(nh_.advertiseService("ur_driver/set_payload", &IOService::setPayload, this))
   {
   }
