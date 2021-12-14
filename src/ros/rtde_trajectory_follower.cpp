@@ -244,7 +244,7 @@ bool RTDETrajectoryFollower::execute(std::vector<TrajectoryPoint> &trajectory, s
 }
 
 bool RTDETrajectoryFollower::servo_stop() {
-  std::this_thread::sleep_for(std::chrono::duration<double>(0.5));
+  std::this_thread::sleep_for(std::chrono::duration<double>(0.3));
   return control_interface_.servoStop();
 }
 
