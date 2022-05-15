@@ -36,7 +36,7 @@ private:
   std::shared_ptr<ur_rtde::DashboardClient> db_client_;
 
   ros::ServiceServer mode_service_, close_safety_popup_service_, power_on_service_, brake_release_service_, 
-    power_off_service_, unlock_protective_stop_service_;
+    power_off_service_, unlock_protective_stop_service_, shutdown_service_;
 
   RobotState state_;
 public:
@@ -51,6 +51,7 @@ public:
     brake_release_service_ = nh_.advertiseService("/ur_driver/dashboard/brake_release", &DashboardClient::brake_release_svc, this);
     power_off_service_ = nh_.advertiseService("/ur_driver/dashboard/power_off", &DashboardClient::power_off_svc, this);
     unlock_protective_stop_service_ = nh_.advertiseService("/ur_driver/dashboard/unlock_protective_stop", &DashboardClient::unlock_protective_stop_svc, this);
+    shutdown_service_ = nh_.advertiseService("/ur_driver/dashboard/shutdown", &DashboardClient::shutdown_svc, this);
   }
   void onRobotStateChange(RobotState state);
 
@@ -119,4 +120,10 @@ public:
     resp.success = true;
     return true;
   }  
+
+  bool shutdown_svc(std_srvs::TriggerRequest& req, std_srvs::TriggerResponse& resp) {
+    db_client_->shutdown();
+    resp.success = true;
+    return true;
+  }
 };
